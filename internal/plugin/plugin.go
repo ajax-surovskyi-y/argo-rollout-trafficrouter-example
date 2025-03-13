@@ -5,7 +5,9 @@ import (
 	"github.com/argoproj/argo-rollouts/pkg/apis/rollouts/v1alpha1"
 	"github.com/argoproj/argo-rollouts/rollout/trafficrouting/plugin/rpc"
 	pluginTypes "github.com/argoproj/argo-rollouts/utils/plugin/types"
+	"github.com/argoproj/argo-rollouts/utils/rollout"
 	"github.com/sirupsen/logrus"
+	"net/http"
 )
 
 var _ rpc.TrafficRouterPlugin = &RpcPlugin{}
@@ -16,43 +18,38 @@ type RpcPlugin struct {
 
 func (p *RpcPlugin) InitPlugin() pluginTypes.RpcError {
 	p.LogCtx.Info("InitPlugin")
-
-	/*loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-	// if you want to change the loading rules (which files in which order), you can do so here
-	configOverrides := &clientcmd.ConfigOverrides{}
-	// if you want to change override values or bind them to flags, there are methods to help you
-	kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides)
-	config, err := kubeConfig.ClientConfig()
-	if err != nil {
-		return pluginTypes.RpcError{ErrorString: err.Error()}
-	}
-	kubeClient, _ := kubernetes.NewForConfig(config)
-
-	kubeInformerFactory := kubeinformers.NewSharedInformerFactoryWithOptions(
-		kubeClient,
-		5*time.Minute,
-		kubeinformers.WithNamespace(metav1.NamespaceAll))
-
-	//cache.WaitForCacheSync(context.Background().Done(), p.ingressWrapper.Informer().HasSynced)
-	*/
 	return pluginTypes.RpcError{}
 }
 
 func (r *RpcPlugin) SetWeight(ro *v1alpha1.Rollout, desiredWeight int32, additionalDestinations []v1alpha1.WeightDestination) pluginTypes.RpcError {
 	r.LogCtx.WithFields(logrus.Fields{
-		"rollout":                ro.Name,
+		"rollout":                ro,
 		"desiredWeight":          desiredWeight,
 		"additionalDestinations": additionalDestinations,
 	}).Info("SetWeight called")
 
-	//s := v1alpha1.NginxTrafficRouting{}
-	//err := json.Unmarshal(ro.Spec.Strategy.Canary.TrafficRouting.Plugins["surovskyi/sample-nats"], &s)
-	//if err != nil {
-	//	return pluginTypes.RpcError{ErrorString: "could not unmarshal nats config"}
-	//}
+	if rollout.IsFullyPromoted(ro) {
+		r.LogCtx.Info("Rollout is fully promoted, skipping weight update")
+		return pluginTypes.RpcError{}
+	}
 
-	//stableIngressName := s.StableIngress
-	//canaryIngressName := getCanaryIngressName(ro, stableIngressName)
+	if !rollout.IsUnpausing(ro) {
+		r.LogCtx.Info("Rollout is pausing, skipping weight update")
+		return pluginTypes.RpcError{}
+	}
+
+	url := fmt.Sprintf("http://host.minikube.internal:8222/debug/weight?weight=%d&desc=%s", desiredWeight, ro.Name+"-"+ro.Status.CurrentPodHash)
+	r.LogCtx.WithField("url", url).Info("sending weight request")
+
+	resp, err := http.Get(url)
+	if err != nil {
+		return pluginTypes.RpcError{ErrorString: fmt.Sprintf("failed to send weight request: %v", err)}
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return pluginTypes.RpcError{ErrorString: fmt.Sprintf("weight request failed with status: %d", resp.StatusCode)}
+	}
 
 	return pluginTypes.RpcError{}
 }
